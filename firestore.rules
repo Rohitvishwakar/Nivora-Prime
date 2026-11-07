@@ -1,0 +1,120 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1: Global Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Pillar 8: Reusable Security Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Schema Validators
+    function isValidUser(data, userId) {
+      return data.keys().hasAll(['id', 'name', 'email']) &&
+             data.keys().hasOnly(['id', 'name', 'email', 'phone', 'avatar', 'wishlist']) &&
+             data.id == userId &&
+             data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+             data.email is string && data.email.size() >= 3 && data.email.size() <= 100 &&
+             (!('phone' in data) || (data.phone is string && data.phone.size() <= 25)) &&
+             (!('avatar' in data) || (data.avatar is string && data.avatar.size() <= 500)) &&
+             (!('wishlist' in data) || (data.wishlist is list && data.wishlist.size() <= 200));
+    }
+
+    function isValidReview(data, reviewId) {
+      return data.keys().hasAll(['id', 'productId', 'userId', 'userName', 'rating', 'comment', 'createdAt']) &&
+             data.keys().hasOnly(['id', 'productId', 'userId', 'userName', 'rating', 'comment', 'createdAt']) &&
+             data.id == reviewId &&
+             isValidId(data.productId) &&
+             data.userId == request.auth.uid &&
+             data.userName is string && data.userName.size() >= 1 && data.userName.size() <= 100 &&
+             data.rating is number && data.rating >= 1 && data.rating <= 5 &&
+             data.comment is string && data.comment.size() >= 1 && data.comment.size() <= 1000 &&
+             data.createdAt is string && data.createdAt.size() <= 40;
+    }
+
+    function isValidCustomerInfo(info) {
+      return info is map &&
+             info.keys().hasAll(['name', 'email', 'address', 'phone']) &&
+             info.keys().hasOnly(['name', 'email', 'address', 'phone']) &&
+             info.name is string && info.name.size() >= 1 && info.name.size() <= 100 &&
+             info.email is string && info.email.size() >= 3 && info.email.size() <= 100 &&
+             info.address is string && info.address.size() >= 3 && info.address.size() <= 500 &&
+             info.phone is string && info.phone.size() >= 6 && info.phone.size() <= 25;
+    }
+
+    // PCI DSS Guard: Only tokenized/masked receipt metadata is allowed; raw card/CVV fields are strictly rejected
+    function isValidPaymentInfo(payment) {
+      return payment is map &&
+             payment.keys().hasAll(['gateway', 'method', 'transactionId', 'maskedInstrument', 'status', 'currency', 'signatureHash', 'authorizedAt']) &&
+             payment.keys().hasOnly(['gateway', 'method', 'transactionId', 'maskedInstrument', 'status', 'currency', 'signatureHash', 'authorizedAt']) &&
+             payment.gateway is string && payment.gateway.size() >= 1 && payment.gateway.size() <= 60 &&
+             payment.method in ['card', 'netbanking', 'wallet', 'upi'] &&
+             payment.transactionId is string && payment.transactionId.size() >= 4 && payment.transactionId.size() <= 80 &&
+             payment.maskedInstrument is string && payment.maskedInstrument.size() >= 2 && payment.maskedInstrument.size() <= 80 &&
+             payment.status in ['captured', 'authorized'] &&
+             payment.currency == 'INR' &&
+             payment.signatureHash is string && payment.signatureHash.size() >= 8 && payment.signatureHash.size() <= 128 &&
+             payment.authorizedAt is string && payment.authorizedAt.size() <= 40;
+    }
+
+    function isValidOrder(data, orderId) {
+      return data.keys().hasAll(['id', 'userId', 'customerInfo', 'items', 'total', 'status', 'createdAt']) &&
+             data.keys().hasOnly(['id', 'userId', 'customerInfo', 'items', 'total', 'status', 'paymentInfo', 'createdAt']) &&
+             data.id == orderId &&
+             ((isSignedIn() && data.userId == request.auth.uid) || (!isSignedIn() && data.userId == 'guest')) &&
+             isValidCustomerInfo(data.customerInfo) &&
+             data.items is list && data.items.size() >= 1 && data.items.size() <= 50 &&
+             data.total is number && data.total > 0 && data.total <= 10000000 &&
+             data.status in ['placed', 'processing', 'shipped', 'delivered'] &&
+             (!('paymentInfo' in data) || isValidPaymentInfo(data.paymentInfo)) &&
+             data.createdAt is string && data.createdAt.size() <= 40;
+    }
+
+    // Collections
+    match /products/{productId} {
+      allow get, list: if true;
+      allow create, update, delete: if false;
+    }
+
+    match /reviews/{reviewId} {
+      allow get, list: if true;
+      allow create: if isSignedIn() && isValidId(reviewId) && isValidReview(incoming(), reviewId);
+      allow update: if isOwner(existing().userId) && isValidReview(incoming(), reviewId) && incoming().createdAt == existing().createdAt;
+      allow delete: if isOwner(existing().userId);
+    }
+
+    match /orders/{orderId} {
+      // Allow lookup by unguessable Order ID for tracking, while protecting list queries per user
+      allow get: if isValidId(orderId) && (resource == null || existing().userId == 'guest' || isOwner(existing().userId));
+      allow list: if isSignedIn() && existing().userId == request.auth.uid;
+      allow create: if isValidId(orderId) && isValidOrder(incoming(), orderId);
+      allow update, delete: if false;
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if false;
+      allow create, update: if isOwner(userId) && isValidUser(incoming(), userId);
+      allow delete: if false;
+    }
+  }
+}

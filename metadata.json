@@ -1,0 +1,6 @@
+{
+  "name": "Nivora Prime",
+  "description": "Premium cosmetics shopping platform featuring high-end beauty products, real-time order tracking, and community reviews.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
